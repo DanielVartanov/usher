@@ -1,37 +1,188 @@
-require 'fuzzy_hash'
+require 'set'
+
+require File.join('usher', 'node', 'root')
+require File.join('usher', 'node', 'root_ignoring_trailing_delimiters')
+require File.join('usher', 'node', 'response')
+require File.join('usher', 'node', 'failed_response')
 
 class Usher
-
+  
+  # The node class used to walk the tree looking for a matching route. The node has three different things that it looks for.
+  # ## Normal
+  # The normal hash is used to normally find matching parts. As well, the reserved key, `nil` is used to denote a variable match.
+  # ## Greedy
+  # The greedy hash is used when you want to match on the entire path. This match can trancend delimiters (unlike the normal match)
+  # and match as much of the path as needed.
+  # ## Request
+  # The request hash is used to find request method restrictions after the entire path has been consumed.
+  # 
+  # Once the node finishes looking for matches, it looks for a `terminates` on the node that is usable. If it finds one, it wraps it into a {Node::Response}
+  # and returns that. All actual matching though should normally be done off of {Node::Root#lookup}
+  # @see Root
   class Node
-    
-    class Response < Struct.new(:path, :params, :remaining_path, :matched_path)
-      def partial_match?
-        !remaining_path.nil?
-      end
-    end
-    
-    attr_reader :normal, :greedy, :request
-    attr_accessor :terminates, :request_method_type, :parent, :value, :request_methods
+
+    Terminates = Struct.new(:choices, :default)
+
+    attr_reader :normal, :greedy, :request, :terminates, :unique_terminating_routes, :meta
+    attr_accessor :default_terminates, :request_method_type, :parent, :value, :request_methods
 
     def initialize(parent, value)
-      @parent = parent
-      @value = value
-      @request = nil
-      @normal = nil
-      @greedy = nil
-      @request_method_type = nil
+      @parent, @value = parent, value
+    end
+
+    def inspect
+      out = ''
+      out << " " * depth
+      out << "#{terminates ? '* ' : ''}#{depth}: #{value.inspect}\n"
+      [:normal, :greedy, :request].each do |node_type|
+        send(node_type).each do |k,v|
+          out << (" " * (depth + 1)) << "#{node_type.to_s[0].chr} #{k.inspect} ==> \n" << v.inspect
+        end if send(node_type)
+      end
+      out
+    end
+
+    def add_meta(obj)
+      create_meta << obj
+    end
+
+    def add_terminate(path)
+      if path.route.when_proc
+        create_terminate.choices << path
+      else
+        create_terminate.default = path
+      end
+      unique_terminating_routes << path.route
+    end
+
+    def remove_terminate(path)
+      if terminates
+        terminates.choices.delete(path)
+        terminates.default = nil if terminates.default == path
+      end
+      unique_terminating_routes.delete_if{|r| r == path.route}
+    end
+
+    protected
+
+    def create_terminate
+      @unique_terminating_routes ||= Set.new
+      @terminates ||= Terminates.new([], nil)
     end
     
+    def create_meta
+      @meta ||= []
+    end
+    
+    def depth
+      @depth ||= parent.is_a?(Node) ? parent.depth + 1 : 0
+    end
+
+    def pick_terminate(request_object)
+      @terminates.choices.find{|(p, t)| p.call(request_object) && t && t.route.recognizable?} || (@terminates.default && @terminates.default.route.recognizable? ? @terminates.default : nil) if @terminates
+    end
+
+    def ancestors
+      unless @ancestors
+        @ancestors = []
+        node = self
+        while (node.respond_to?(:parent))
+          @ancestors << node
+          node = node.parent
+        end
+      end
+      @ancestors
+    end
+
+    def root
+      @root ||= ancestors.last
+    end
+
+    def route_set
+      @route_set ||= root.route_set
+    end
+
+    def find(request_object, original_path, path, params = [], gathered_meta = nil)
+      (gathered_meta ||= []).concat(meta) if meta
+      # terminates or is partial
+      if terminating_path = pick_terminate(request_object) and (path.empty? || terminating_path.route.partial_match?)
+        response = terminating_path.route.partial_match? ?
+          Response.new(terminating_path, params, path.join, original_path[0, original_path.size - path.join.size], false, gathered_meta) :
+          Response.new(terminating_path, params, nil, original_path, false, gathered_meta)
+      # terminates or is partial
+      elsif !path.empty? and greedy and match_with_result_output = greedy.match_with_result(whole_path = path.join)
+        child_node, matched_part = match_with_result_output
+        whole_path.slice!(0, matched_part.size)
+        params << matched_part if child_node.value.is_a?(Route::Variable)
+        child_node.find(request_object, original_path, whole_path.empty? ? whole_path : route_set.splitter.split(whole_path), params, gathered_meta)
+      elsif !path.empty? and normal and child_node = normal[path.first] || normal[nil]
+        part = path.shift
+        case child_node.value
+        when String
+        when Route::Variable::Single
+          variable = child_node.value                               # get the variable
+          variable.valid!(part)                                     # do a validity check
+          until path.empty? || (variable.look_ahead === path.first) # variables have a look ahead notion,
+            next_path_part = path.shift                             # and until they are satified,
+            part << next_path_part
+          end if variable.look_ahead
+          params << part                                            # because its a variable, we need to add it to the params array
+        when Route::Variable::Glob
+          params << []
+          loop do
+            if (child_node.value.look_ahead === part || (!route_set.delimiters.unescaped.include?(part) && child_node.value.regex_matcher && !child_node.value.regex_matcher.match(part)))
+              path.unshift(part)
+              path.unshift(child_node.parent.value) if route_set.delimiters.unescaped.include?(child_node.parent.value)
+              break
+            elsif !route_set.delimiters.unescaped.include?(part)
+              child_node.value.valid!(part)
+              params.last << part
+            end
+            unless part = path.shift
+              break
+            end
+          end
+        end
+        child_node.find(request_object, original_path, path, params, gathered_meta)
+      elsif request_method_type
+        if route_set.priority_lookups?
+          route_candidates = []
+          if specific_node = request[request_object.send(request_method_type)] and ret = specific_node.find(request_object, original_path, path.dup, params.dup, gathered_meta && gathered_meta.dup)
+            route_candidates << ret
+          end
+          if general_node = request[nil] and ret = general_node.find(request_object, original_path, path.dup, params.dup, gathered_meta && gathered_meta.dup)
+            route_candidates << ret
+          end
+          route_candidates.sort!{|r1, r2| r1.path.route.priority <=> r2.path.route.priority}
+          request_method_respond(route_candidates.last, request_method_type)
+        else
+          if specific_node = request[request_object.send(request_method_type)] and ret = specific_node.find(request_object, original_path, path.dup, params.dup, gathered_meta && gathered_meta.dup)
+            ret
+          elsif general_node = request[nil] and ret = general_node.find(request_object, original_path, path.dup, params.dup, gathered_meta && gathered_meta.dup)
+            request_method_respond(ret, request_method_type)
+          else
+            request_method_respond(nil, request_method_type)
+          end
+        end
+      else
+        route_set.detailed_failure? ? FailedResponse.new(self, :normal_or_greedy, nil) : nil
+      end
+    end
+
+    def request_method_respond(ret, request_method_respond)
+      ret || (route_set.detailed_failure? ? FailedResponse.new(self, :request_method, request_method_respond) : nil)
+    end
+
     def activate_normal!
-      @normal ||= Hash.new
+      @normal ||= {}
     end
 
     def activate_greedy!
-      @greedy ||= Hash.new
+      @greedy ||= {}
     end
 
     def activate_request!
-      @request ||= Hash.new
+      @request ||= {}
     end
 
     def upgrade_normal!
@@ -46,239 +197,5 @@ class Usher
       @request = FuzzyHash.new(@request)
     end
 
-    def depth
-      @depth ||= @parent.is_a?(Node) ? @parent.depth + 1 : 0
-    end
-    
-    def greedy?
-      @greedy
-    end
-    
-    def self.root(route_set, request_methods)
-      root = self.new(route_set, nil)
-      root.request_methods = request_methods
-      root
-    end
-
-    def terminates?
-      @terminates && @terminates.route.recognizable?
-    end
-
-    def pp
-      $stdout << " " * depth
-      $stdout << "#{terminates? ? '* ' : ''}#{depth}: #{value.inspect}\n"
-      normal.each do |k,v|
-        $stdout << " " * (depth + 1)
-        $stdout << ". #{k.inspect} ==> \n"
-        v.pp
-      end if normal
-      greedy.each do |k,v|
-        $stdout << " " * (depth + 1)
-        $stdout << "g #{k.inspect} ==> \n"
-        v.pp
-      end if greedy
-      request.each do |k,v|
-        $stdout << " " * (depth + 1)
-        $stdout << "r #{k.inspect} ==> \n"
-        v.pp
-      end if request
-    end
-    
-    def add(route)
-      route.paths.each do |path|
-        set_path_with_destination(path)
-      end
-    end
-    
-    def delete(route)
-      route.paths.each do |path|
-        set_path_with_destination(path, nil)
-      end
-    end
-    
-    def unique_routes(node = self, routes = [])
-      routes << node.terminates.route if node.terminates
-      node.normal.values.each do |v|
-        unique_routes(v, routes)
-      end if node.normal
-      node.greedy.values.each do |v|
-        unique_routes(v, routes)
-      end if node.greedy
-      node.request.values.each do |v|
-        unique_routes(v, routes)
-      end if node.request
-      routes.uniq!
-      routes
-    end
-    
-    def find(usher, request_object, original_path, path, params = [], position = 0)
-      if terminates? && (path.empty? || terminates.route.partial_match?)
-        terminates.route.partial_match? ?
-          Response.new(terminates, params, original_path[position, original_path.size], original_path[0, position]) :
-          Response.new(terminates, params, nil, original_path)
-      elsif !path.empty? and greedy and match_with_result_output = greedy.match_with_result(whole_path = original_path[position, original_path.size])
-				next_path, matched_part = match_with_result_output
-        position += matched_part.size
-        whole_path.slice!(0, matched_part.size)
-        params << [next_path.value.name, matched_part] if next_path.value.is_a?(Route::Variable)
-        next_path.find(usher, request_object, original_path, whole_path.empty? ? whole_path : usher.splitter.url_split(whole_path), params, position)
-      elsif !path.empty? and normal and next_part = normal[path.first] || normal[nil]
-        part = path.shift
-        position += part.size
-        case next_part.value
-        when String
-          # do nothing
-        when Route::Variable::Single
-          # get the variable
-          var = next_part.value
-          # do a validity check
-          var.valid!(part)
-          # because its a variable, we need to add it to the params array
-          params << [var.name, part]
-          until path.empty? || (var.look_ahead === path.first)                # variables have a look ahead notion, 
-            next_path_part = path.shift                                       # and until they are satified,
-            position += next_path_part.size                                   # keep appending to the value in params
-            params.last.last << next_path_part
-          end if var.look_ahead && usher.delimiters.size > 1
-        when Route::Variable::Glob
-          params << [next_part.value.name, []]
-          while true
-            if (next_part.value.look_ahead === part || (!usher.delimiters.unescaped.include?(part) && next_part.value.regex_matcher && !next_part.value.regex_matcher.match(part)))
-              path.unshift(part)
-              position -= part.size
-              if usher.delimiters.unescaped.include?(next_part.parent.value)
-                path.unshift(next_part.parent.value)
-                position -= next_part.parent.value.size
-              end
-              break
-            elsif !usher.delimiters.unescaped.include?(part)
-              next_part.value.valid!(part)
-              params.last.last << part
-            end
-            if path.empty?
-              break
-            else
-              part = path.shift
-            end
-          end
-        end
-        next_part.find(usher, request_object, original_path, path, params, position)
-      elsif request_method_type
-        if specific_node = request[request_object.send(request_method_type)] and ret = specific_node.find(usher, request_object, original_path, path.dup, params.dup, position)
-          ret
-        elsif general_node = request[nil] and ret = general_node.find(usher, request_object, original_path, path.dup, params.dup, position)
-          ret
-        else
-          nil
-        end
-      else
-        nil
-      end
-    end
-
-    private
-    
-    def set_path_with_destination(path, destination = path)
-      nodes = [path.parts.inject(self){ |node, key| process_path_part(node, key) }]
-      nodes = process_request_parts(nodes, request_methods_for_path(path)) if request_methods
-      
-      nodes.each do |node|
-        while node.request_method_type
-          node = (node.request[nil] ||= Node.new(node, Route::RequestMethod.new(node.request_method_type, nil)))
-        end
-        node.terminates = destination
-      end
-    end
-    
-    def request_method_index(type)
-      request_methods.index(type)
-    end
-    
-    def process_request_parts(nodes, parts)
-      while parts.any?{ |p| !p.trivial? }
-        key = parts.shift
-
-        next if key.trivial?
-        
-        nodes.map! do |node|
-        
-          node.activate_request!
-
-          if node.request_method_type.nil?
-            node.request_method_type = key.type
-            node.upgrade_request! if key.value.is_a?(Regexp)
-            Array(key.value).map{|k| node.request[k] ||= Node.new(node, key) }
-          else
-            case request_method_index(node.request_method_type) <=> request_method_index(key.type)
-            when -1
-              parts.unshift(key)
-              Array(key.value).map{|k| node.request[k] ||= Node.new(node, Route::RequestMethod.new(node.request_method_type, nil)) }
-            when 0
-              node.upgrade_request! if key.value.is_a?(Regexp)
-              Array(key.value).map{|k| node.request[k] ||= Node.new(node, key) }
-            when 1
-              previous_node = node.parent
-              current_node_entry_key = nil
-              current_node_entry_lookup = nil
-              [previous_node.normal, previous_node.greedy, previous_node.request].compact.each do |l|
-                current_node_entry_key = l.each{|k,v| break k if node == v}
-                current_node_entry_lookup = l and break if current_node_entry_key
-              end
-
-              current_node_entry_lookup.respond_to?(:delete_value) ? 
-                current_node_entry_lookup.delete_value(node) : current_node_entry_lookup.delete_if{|k,v| v == node}
-
-              new_node = Node.new(previous_node, Route::RequestMethod.new(key.type, nil))
-              new_node.activate_request!
-              new_node.request_method_type = key.type
-              current_node_entry_lookup[current_node_entry_key] = new_node
-              node.parent = new_node
-              new_node.request[nil] = node
-              parts.unshift(key)
-              new_node
-            end
-          end
-        end
-        nodes.flatten!
-      end
-      nodes
-    end      
-      
-    
-    def process_path_part(node, key)
-      case key
-      when Route::Variable::Greedy
-        node.activate_greedy!
-        if key.regex_matcher
-          node.upgrade_greedy!
-          node.greedy[key.regex_matcher] ||= Node.new(node, key)
-        else
-          node.greedy[nil] ||= Node.new(node, key)
-        end  
-      when Route::Variable
-        node.activate_normal!
-        if key.regex_matcher
-          node.upgrade_normal!
-          node.normal[key.regex_matcher] ||= Node.new(node, key)
-        else
-          node.normal[nil] ||= Node.new(node, key)
-        end
-      when Route::Static::Greedy
-        node.activate_greedy!
-        node.upgrade_greedy!
-        node.greedy[key] ||= Node.new(node, key)
-      else
-        node.activate_normal!
-        node.upgrade_normal! if key.is_a?(Regexp)
-        node.normal[key] ||= Node.new(node, key)
-      end
-    end
-    
-    def request_methods_for_path(path)
-      request_methods.collect do |type|
-        Route::RequestMethod.new(type, path.route.conditions && path.route.conditions[type])
-      end
-    end
-    
   end
 end

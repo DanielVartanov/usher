@@ -3,7 +3,6 @@ class Usher
     class Generators
 
       class Generic
-
         attr_accessor :usher
 
         def generate(name, params)
@@ -12,28 +11,13 @@ class Usher
 
         def generate_path_for_base_params(path, params)
           raise UnrecognizedException.new unless path
-
-          result = ''
-          path.parts.each do |part|
-            case part
-            when Route::Variable::Glob
-              value = (params && params.delete(part.name)) || part.default_value || raise(MissingParameterException.new)
-              value.each_with_index do |current_value, index|
-                part.valid!(current_value)
-                result << current_value.to_s
-                result << usher.delimiters.first if index != value.size - 1
-              end
-            when Route::Variable
-              value = (params && params.delete(part.name)) || part.default_value || raise(MissingParameterException.new)
-              part.valid!(value)
-              result << value.to_s
-            else
-              result << part
-            end
+          case params
+          when nil, Hash
+            path.generate_from_hash(params)
+          else
+            path.generate(*Array(params).slice!(0, path.dynamic_parts.size))
           end
-          result
         end
-
       end
 
       class URL < Generic
@@ -44,9 +28,7 @@ class Usher
           end
 
           def protocol
-            return @protocol unless @protocol.nil?            
-
-            @protocol = scheme ? "#{scheme}://" : request.protocol
+            @protocol ||= scheme ? "#{scheme}://" : request.protocol
           end
 
           def host
@@ -58,8 +40,6 @@ class Usher
           end
 
           def port_string
-            return @port_string unless @port_string.nil?
-
             @port_string ||= standard_port? ? '' : ":#{port}"
           end
 
@@ -80,7 +60,7 @@ class Usher
           end
 
           def ssl?
-            protocol[4] == ?s
+            protocol[0..4] == 'https'
           end
         end
 
@@ -95,7 +75,7 @@ class Usher
           result << generate_path(path, params)
         end
 
-        # Generates a completed URL based on a +route+ or set of optional +params+
+        # Generates a completed URL based on a `route` or set of optional `params`
         #
         #   set = Usher.new
         #   route = set.add_named_route(:test_route, '/:controller/:action')
@@ -108,17 +88,27 @@ class Usher
 
         def generate_path(path, params = nil, generate_extra = true)
           params = Array(params) if params.is_a?(String)
-          if params.is_a?(Array)
-            given_size = params.size
+          extra_params = nil
+          case params
+          when nil
+            params = path && path.route.default_values
+          when Hash
+            params = path.route.default_values.merge(params) if path && path.route.default_values
+          else
+            params = Array(params)
             extra_params = params.last.is_a?(Hash) ? params.pop : nil
-            params = Hash[*path.dynamic_parts.inject([]){|a, dynamic_part| a.concat([dynamic_part.name, params.shift || raise(MissingParameterException.new("got #{given_size}, expected #{path.dynamic_parts.size} parameters"))]); a}]
-            params.merge!(extra_params) if extra_params
+            raise MissingParameterException.new("got #{params.size}, expected #{path.dynamic_parts.size} parameters") unless path.dynamic_parts.size == params.size
           end
-
-          result = Rack::Utils.uri_escape(generate_path_for_base_params(path, params))
-          unless !generate_extra || params.nil? || params.empty?
-            extra_params = generate_extra_params(params, result[??])
-            result << extra_params
+          result = generate_path_for_base_params(path, params)
+          Rack::Utils.uri_escape!(result)
+          
+          params = extra_params if extra_params
+          
+          if generate_extra && params && !params.empty?
+            if usher.consider_destination_keys? && path.route.destination_keys
+              params.delete_if{|k, v| path.route.destination_keys.include?(k)}
+            end
+            result << '?' << generate_querystring(params) unless params.empty?
           end
           result
         end
@@ -141,8 +131,8 @@ class Usher
 
             @generation_module.module_eval <<-END_EVAL
               def respond_to?(method_name)
-                if match = Regexp.new('^(.*?)_(path|url)$').match(method_name.to_s)
-                  @@generator.usher.named_routes.key?(match.group(1))
+                if method_name =~ /^(.*?)_(path|url)$/
+                  @@generator.usher.named_routes.key?($1)
                 else
                   super
                 end
@@ -181,8 +171,28 @@ class Usher
           (url[-1] == ?/) ? url[0..-2] : url
         end
 
-        def path_for_routing_lookup(routing_lookup, params = {})                    
+        def generate_querystring(params)
+          extra_params_result = ''
+          params.each do |k,v|
+            case v
+            when Array
+              v.each do |v_part|
+                extra_params_result << '&' unless extra_params_result.empty?
+                extra_params_result << Rack::Utils.escape(k.to_s) << '%5B%5D=' << Rack::Utils.escape(v_part.to_s)
+              end
+            else
+              extra_params_result << '&' unless extra_params_result.empty?
+              extra_params_result << Rack::Utils.escape(k.to_s) << '=' << Rack::Utils.escape(v.to_s)
+            end
+          end
+          extra_params_result
+        end
+
+
+        def path_for_routing_lookup(routing_lookup, params = {})
           path = case routing_lookup
+          when Route::Path
+            routing_lookup
           when Symbol
             route = @usher.named_routes[routing_lookup]
             raise UnrecognizedException unless route
@@ -191,30 +201,9 @@ class Usher
             routing_lookup.find_matching_path(params)
           when nil
             params.is_a?(Hash) ? usher.path_for_options(params) : raise
-          when Route::Path
-            routing_lookup
           end
         end
-
-
-        def generate_extra_params(params, has_question_mark)
-          extra_params_result = ''
-
-          params.each do |k,v|
-            case v
-            when Array
-              v.each do |v_part|
-                extra_params_result << (has_question_mark ? '&' : has_question_mark = true && '?') << Rack::Utils.escape("#{k.to_s}[]") << '=' << Rack::Utils.escape(v_part.to_s)
-              end
-            else
-              extra_params_result << (has_question_mark ? '&' : has_question_mark = true && '?') << Rack::Utils.escape(k.to_s) << '=' << Rack::Utils.escape(v.to_s)
-            end
-          end
-          extra_params_result
-        end
-
       end
-
     end
   end
 end

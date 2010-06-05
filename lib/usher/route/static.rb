@@ -1,7 +1,9 @@
 class Usher
   class Route
     class Static
-      class Greedy < String
+      class Greedy < Regexp
+        
+        attr_accessor :generate_with
         
       end
     end

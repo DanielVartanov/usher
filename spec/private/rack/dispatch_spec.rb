@@ -7,6 +7,21 @@ route_set.extend(CallWithMockRequestMixin)
 
 describe "Usher (for rack) route dispatching" do
   before(:each) do
+    @route_set = Usher::Interface.for(:rack, :redirect_on_trailing_delimiters => true)
+    @route_set.extend(CallWithMockRequestMixin)
+    @app = MockApp.new("Hello World!")
+    @route_set.add('/sample').to(@app)
+  end
+
+  it "should dispatch a request" do
+    response = @route_set.call_with_mock_request('/sample/')
+    response.headers["Location"].should == "/sample"
+  end
+
+end
+
+describe "Usher (for rack) route dispatching" do
+  before(:each) do
     route_set.reset!
     @app = MockApp.new("Hello World!")
   end
@@ -51,6 +66,15 @@ describe "Usher (for rack) route dispatching" do
     end
   end
 
+  it "should returns HTTP 405 if the method mis-matches" do
+    route_set.reset!
+    route_set.add('/sample', :conditions => {:request_method => 'POST'}).to(@app)
+    route_set.add('/sample', :conditions => {:request_method => 'PUT'}).to(@app)
+    response = route_set.call_with_mock_request('/sample', 'GET')
+    response.status.should eql(405)
+    response['Allow'].should == 'POST, PUT'
+  end
+
   it "should returns HTTP 404 if route doesn't exist" do
     response = route_set.call_with_mock_request("/not-existing-url")
     response.status.should eql(404)
@@ -75,6 +99,21 @@ describe "Usher (for rack) route dispatching" do
     end
   end
 
+  describe "non rack app destinations" do
+    it "should route to a default application when using a hash" do
+      $captures = []
+      @default_app = lambda do |e|
+        $captures << :default
+        Rack::Response.new("Default").finish
+      end
+      @router = Usher::Interface.for(:rack)
+      @router.default(@default_app)
+      @router.add("/default").to(:action => "default")
+      response = @router.call(Rack::MockRequest.env_for("/default"))
+      $captures.should == [:default]
+    end
+  end
+
   describe "mounted rack instances" do
     before do
       @bad_app = mock("bad_app")
@@ -84,6 +123,12 @@ describe "Usher (for rack) route dispatching" do
       @usher2.add("/bad"  ).match_partially!.to(@bad_app)
       @usher2.add("/some(/:foo)").to(@app)
 
+      @usher3 = Usher::Interface.for(:rack)
+      @usher3.add("(/)", :default_values => {:optional_root => true} ).to(@app)
+
+      @usher2.add("/optional_mount").match_partially!.to(@usher3)
+
+      route_set.add("/baz", :default_values => {:baz => "baz"}).match_partially!.to(@usher3)
       route_set.add("/foo/:bar", :default_values => {:foo => "foo"}).match_partially!.to(@usher2)
       route_set.add("/foo", :default_values => {:controller => :foo}).to(@app)
     end
@@ -91,6 +136,37 @@ describe "Usher (for rack) route dispatching" do
     it "should match the route without nesting" do
       @app.should_receive(:call).once.with{ |e| e['usher.params'].should == {:controller => :foo}}
       route_set.call(Rack::MockRequest.env_for("/foo"))
+    end
+
+    it "should match the route where the last part is optional" do
+      @app.should_receive(:call).once.with do |e|
+        e['usher.params'].should == {
+          :optional_root  => true,
+          :baz            => 'baz'
+        }
+      end
+      route_set.call(Rack::MockRequest.env_for("/baz/"))
+    end
+
+    it "should match when a mounted apps root route is optional" do
+      @app.should_receive(:call).once.with do |e|
+        e['usher.params'].should == {
+          :optional_root => true,
+          :foo           => "foo",
+          :bar           => "bar"
+        }
+      end
+      route_set.call(Rack::MockRequest.env_for("/foo/bar/optional_mount"))
+    end
+
+    it "should match the route where the last part is empty" do
+      @app.should_receive(:call).once.with do |e|
+        e['usher.params'].should == {
+          :baz            => 'baz',
+          :optional_root  => true
+        }
+      end
+      route_set.call(Rack::MockRequest.env_for("/baz"))
     end
 
     it "should route through the first route, and the second to the app" do
@@ -195,13 +271,13 @@ describe "Usher (for rack) route dispatching" do
       end
     end
   end
-  
+
   describe "use as middlware" do
     it "should allow me to set a default application to use" do
       @app.should_receive(:call).with{|e| e['usher.params'].should == {:middle => :ware}}
 
       u = Usher::Interface.for(:rack)
-      u.app = @app
+      u.default @app
       u.add("/foo", :default_values => {:middle => :ware}).name(:foo)
 
       u.call(Rack::MockRequest.env_for("/foo"))
@@ -211,14 +287,14 @@ describe "Usher (for rack) route dispatching" do
       env = Rack::MockRequest.env_for("/not_a_route")
       @app.should_receive(:call).with(env)
       u = Usher::Interface.for(:rack)
-      u.app = @app
+      u.default @app
       u.call(env)
     end
 
     it "should allow me to set the application after initialization" do
       @app.should_receive(:call).with{|e| e['usher.params'].should == {:after => :stuff}}
       u = Usher::Interface.for(:rack)
-      u.app = @app
+      u.default @app
       u.add("/foo", :default_values => {:after => :stuff})
       u.call(Rack::MockRequest.env_for("/foo"))
     end

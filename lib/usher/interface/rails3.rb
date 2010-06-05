@@ -1,56 +1,55 @@
 class Usher
   module Interface
     class Rails3
-    
-      @@instance = nil
-    
+      
+      attr_reader :router
+      
       def initialize
-        @usher = Usher.new
-        @controller_paths = []
-        @configurations_files = []
-        
-        @@instance = self
+        @router = Usher.new(:request_methods => [:request_method, :host, :port, :scheme], :generator => Usher::Util::Generators::URL.new)
       end
       
-      def self.instance
-        @@instance
+      # Builder method to add a route to the set
+      #
+      # <tt>app</tt>:: A valid Rack app to call if the conditions are met.
+      # <tt>conditions</tt>:: A hash of conditions to match against.
+      #                       Conditions may be expressed as strings or
+      #                       regexps to match against.
+      # <tt>defaults</tt>:: A hash of values that always gets merged in
+      # <tt>name</tt>:: Symbol identifier for the route used with named
+      #                 route generations
+      def add_route(app, conditions = {}, defaults = {}, name = nil)
+        route = router.add_route(conditions.delete(:path_info), :conditions => conditions, :defaults => defaults)
+        route.name(name) if name
+        route.to(app)
       end
-      
-      def draw(&blk)
-        @usher.instance_eval(&blk)
-      end
-      
-      attr_accessor :controller_paths
-      
-      def add_configuration_file(file)
-        @configurations_files << file
-      end
-      
-      def reload
-        @usher.reset!
-        @configurations_files.each do |c|
-          Kernel.load(c)
-        end
-      end
-      alias_method :reload!, :reload
       
       def call(env)
-        request = ActionDispatch::Request.new(env)
-        response = @usher.recognize(request, request.path_info)
-        request.parameters.merge!(response.path.route.default_values) if response.path.route.default_values
-        response.params.each{ |hk| request.parameters[hk.first] = hk.last}
-        controller = "#{request.parameters[:controller].to_s.camelize}Controller".constantize
-        controller.action(request.parameters[:action] || 'index').call(env)
-      end
-
-      def recognize(request)
-        params = recognize_path(request.path, extract_request_environment(request))
-        request.path_parameters = params.with_indifferent_access
-        "#{params[:controller].to_s.camelize}Controller".constantize
+        request = ::Rack::Request.new(env)
+        response = router.recognize(request, request.path_info)
+        if response
+          response.destination.call(env)
+        else
+          ::Rack::Response.new("No route found", 404).finish
+        end
       end
       
-      def load(app)
-        @app = app
+      # Generates a url from Rack env and identifiers or significant keys.
+      #
+      # To generate a url by named route, pass the name in as a `Symbol`.
+      #   url(env, :dashboard) # => "/dashboard"
+      #
+      # Additional parameters can be passed in as a hash
+      #   url(env, :people, :id => "1") # => "/people/1"
+      #
+      # If no name route is given, it will fall back to a slower
+      # generation search.
+      #   url(env, :controller => "people", :action => "show", :id => "1")
+      #     # => "/people/1"
+      def url(env, *args)
+      end
+      
+      def reset!
+        router.reset!
       end
       
     end

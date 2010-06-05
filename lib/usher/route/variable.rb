@@ -1,6 +1,31 @@
 class Usher
   class Route
     class Variable
+
+      module Validator
+        def validates?
+          true
+        end
+      end
+
+      module ProcValidator
+        include Validator
+        def valid!(val)
+          begin
+            @validator.call(val) or raise(ValidationException.new("#{val} does not conform to #{@validator}"))
+          rescue Exception => e
+            raise ValidationException.new("#{val} does not conform to #{@validator}, root cause #{e.inspect}")
+          end
+        end
+      end
+
+      module CaseEqualsValidator
+        include Validator
+        def valid!(val)
+          @validator === val.to_s or raise(ValidationException.new("#{val} does not conform to #{@validator}"))
+        end
+      end
+      
       attr_reader :type, :name, :validator, :regex_matcher
       attr_accessor :look_ahead, :default_value, :look_ahead_priority
       
@@ -10,12 +35,12 @@ class Usher
         @regex_matcher = regex_matcher
         
         case @validator
-        when Proc
-          self.extend(ProcValidator)
         when nil
           # do nothing
+        when Proc
+          extend(ProcValidator)
         else
-          self.extend(CaseEqualsValidator)
+          extend(CaseEqualsValidator)
         end
       end
       private :initialize
@@ -23,20 +48,8 @@ class Usher
       def valid!(val)
       end
       
-      module ProcValidator
-        def valid!(val)
-          begin
-            @validator.call(val)
-          rescue Exception => e
-            raise ValidationException.new("#{val} does not conform to #{@validator}, root cause #{e.inspect}")
-          end
-        end
-      end
-
-      module CaseEqualsValidator
-        def valid!(val)
-          @validator === val or raise(ValidationException.new("#{val} does not conform to #{@validator}"))
-        end
+      def validates?
+        false
       end
       
       def ==(o)

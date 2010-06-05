@@ -21,6 +21,29 @@ describe "Rack interface extensions for Usher::Route" do
       status, headers, body = @route_set.call(@env)
       headers["Location"].should eql("/")
     end
+
+    it "should redirect '/:id.html' to '/:id'" do
+      @route_set.get("/:id.html").redirect('/#{params[:id]}')
+      @env = Rack::MockRequest.env_for("/123.html")
+      status, headers, body = @route_set.call(@env)
+      headers["Location"].should eql("/123")
+    end
+  end
+
+  describe "static file serving" do
+    it "should serve from a static directory" do
+      @route_set.get("/static").serves_static_from(File.dirname(__FILE__))
+      @env = Rack::MockRequest.env_for("/static/#{File.basename(__FILE__)}")
+      status, headers, body = @route_set.call(@env)
+      body.path.should == File.join(File.dirname(__FILE__), File.basename(__FILE__))
+    end
+
+    it "should serve a specific file" do
+      @route_set.get("/static-file").serves_static_from(__FILE__)
+      @env = Rack::MockRequest.env_for("/static-file")
+      status, headers, body = @route_set.call(@env)
+      body.path.should == __FILE__
+    end
   end
 
   describe "chaining" do

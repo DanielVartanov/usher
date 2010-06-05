@@ -36,19 +36,13 @@ describe "Usher route adding" do
     route_set.add_named_route(:route, '/bad/route', :controller => 'sample').should == route_set.named_routes[:route]
   end
 
-  it "should allow named routes to be added" do
+  it "should allow named routes to be deleted" do
     route_set.add_named_route(:route, '/bad/route', :controller => 'sample').should == route_set.named_routes[:route]
     route_set.route_count.should == 1
     route_set.named_routes.size == 1
     route_set.delete_named_route(:route, '/bad/route', :controller => 'sample')
     route_set.route_count.should == 0
     route_set.named_routes.size == 0
-  end
-
-  it "should calculate depths for nodes" do
-    route_set.add_named_route(:route, '/bad/route/three/four')
-    route_set.root.depth.should == 0
-    route_set.root.normal['/'].depth.should == 1
   end
 
   describe "merging paths" do

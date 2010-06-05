@@ -19,6 +19,11 @@ describe "Usher URL generation" do
     @route_set.generator.generate(:sample, {:action => 'action'}).should == '/sample/action'
   end
 
+  it "should generate a simple URL and ignore the optional part" do
+    @route_set.add_named_route(:test, '/test1/url2(.:format)')
+    @route_set.generator.generate(:test, {:foo => 'baz'}).should == '/test1/url2?foo=baz'
+  end
+
   it "should generate a simple URL with a single variable (and escape)" do
     @route_set.add_named_route(:sample, '/sample/:action', :controller => 'sample')
     @route_set.generator.generate(:sample, {:action => 'action time'}).should == '/sample/action%20time'
@@ -41,6 +46,11 @@ describe "Usher URL generation" do
 
   it "should generate a mutliple vairable URL from an array" do
     @route_set.add_named_route(:sample, '/sample/:first/:second', :controller => 'sample')
+    @route_set.generator.generate(:sample, ['maz', 'zoo']).should == '/sample/maz/zoo'
+  end
+
+  it "should generate a mutliple vairable URL from an array where the same variable name is repeated" do
+    @route_set.add_named_route(:sample, '/sample/:first/:first', :controller => 'sample')
     @route_set.generator.generate(:sample, ['maz', 'zoo']).should == '/sample/maz/zoo'
   end
 
@@ -135,6 +145,26 @@ describe "Usher URL generation" do
   it "should generate a route with optional segments given two nested optional parameters" do
     @route_set.add_named_route(:optionals, '/:controller(/:action(/:id))(.:format)')
     @route_set.generator.generate(:optionals, {:controller => "foo", :action => "bar"}).should == '/foo/bar'
+  end
+
+  it "should generate a route with default values that aren't represented in the path" do
+    @route_set.add_named_route(:default_values_not_in_path, '/:controller', :default_values => {:page => 1})
+    @route_set.generator.generate(:default_values_not_in_path, {:controller => "foo"}).should == '/foo?page=1'
+  end
+
+  describe "with consider_destination_keys enabled" do
+    
+    before(:each) do
+      @route_set = Usher.new(:generator => Usher::Util::Generators::URL.new, :consider_destination_keys => true)
+      @route_set.reset!
+    end
+
+    it "should generate direct unnamed paths" do
+      @route_set.add_route('/profiles', :controller => 'profiles', :action => 'edit')
+      @route_set.add_route('/users', :controller => 'users', :action => 'index')
+      @route_set.generator.generate(nil, :controller => 'profiles', :action => 'edit').should == '/profiles'
+      @route_set.generator.generate(nil, :controller => 'users', :action => 'index').should == '/users'
+    end
   end
 
   describe "when named route was added with string key" do
@@ -249,6 +279,19 @@ describe "Usher URL generation" do
         end
 
         it_should_behave_like "correct routes generator"
+      end
+    end
+  end
+
+  describe "#path_for_routing_lookup" do
+    describe "when direct route exists" do
+      before :each do
+        @route_set = Usher.new(:generator => Usher::Util::Generators::URL.new, :consider_destination_keys => true)
+        @route = @route_set.add_named_route(:direct_path, '/some-neat-name', :controller => 'foo', :action => 'bar')
+      end
+
+      it "should return exactly this route" do
+        @route_set.generator.path_for_routing_lookup(nil, :controller => 'foo', :action => 'bar').should == @route.paths.first
       end
     end
   end

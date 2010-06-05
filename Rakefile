@@ -1,35 +1,63 @@
 # encoding: utf-8
 
-require File.expand_path(File.join(File.dirname(__FILE__), 'lib', 'usher'))
-
-begin
-  require 'jeweler'
-  Jeweler::Tasks.new do |s|
-    s.name = "usher"
-    s.description = s.summary = "A general purpose routing library"
-    s.email = "joshbuddy@gmail.com"
-    s.homepage = "http://github.com/joshbuddy/usher"
-    s.authors = ["Joshua Hull", 'Jakub Šťastný', 'Daniel Neighman', 'Daniel Vartanov'].sort
-    s.files = FileList["[A-Z]*", "{lib,spec,rails}/**/*"]
-    s.add_dependency 'fuzzyhash', '>=0.0.9'
-    s.rubyforge_project = 'joshbuddy-usher'
-  end
-  Jeweler::GemcutterTasks.new
-rescue LoadError
-  puts "Jeweler not available. Install it with: sudo gem install technicalpickles-jeweler -s http://gems.github.com"
-end
-
 require 'spec'
 require 'spec/rake/spectask'
-task :spec => 'spec:all'
+require 'yard'
+
+YARD::Rake::YardocTask.new do |t|
+  t.files   = ['lib/**/*.rb']   # optional
+  t.options = ['--markup=markdown'] # optional
+end
+
+task :spec => ['spec:private', 'spec:rails2_2:spec', 'spec:rails2_3:spec']
 namespace(:spec) do
-  Spec::Rake::SpecTask.new(:all) do |t|
+  Spec::Rake::SpecTask.new(:private) do |t|
     t.spec_opts ||= []
     t.spec_opts << "-rubygems"
     t.spec_opts << "--options" << "spec/spec.opts"
-    t.spec_files = FileList['spec/**/*_spec.rb']
+    t.spec_files = FileList['spec/private/**/*_spec.rb']
   end
 
+  namespace(:rails2_2) do
+    task :unzip do
+      sh('rm -rf spec/rails2_2/vendor')
+      sh('unzip -qq spec/rails2_2/vendor.zip -dspec/rails2_2')
+    end
+
+    Spec::Rake::SpecTask.new(:only_spec) do |t|
+      t.spec_opts ||= []
+      t.spec_opts << "-rubygems"
+      t.spec_opts << "--options" << "spec/spec.opts"
+      t.spec_files = FileList['spec/rails2_2/**/*_spec.rb']
+    end
+    
+    task :cleanup do
+      sh('rm -rf spec/rails2_2/vendor')
+    end
+
+    task :spec => [:unzip, :only_spec, :cleanup]
+  end
+
+  namespace(:rails2_3) do
+    task :unzip do
+      sh('rm -rf spec/rails2_3/vendor')
+      sh('unzip -qq spec/rails2_3/vendor.zip -dspec/rails2_3')
+    end
+
+    Spec::Rake::SpecTask.new(:only_spec) do |t|
+      t.spec_opts ||= []
+      t.spec_opts << "-rubygems"
+      t.spec_opts << "--options" << "spec/spec.opts"
+      t.spec_files = FileList['spec/rails2_3/**/*_spec.rb']
+    end
+    task :cleanup do
+      sh('rm -rf spec/rails2_3/vendor')
+    end
+
+    task :spec => [:unzip, :only_spec, :cleanup]
+  end
+  
+  
 end
 
 desc "Run all examples with RCov"
@@ -45,4 +73,10 @@ Rake::RDocTask.new do |rd|
   rd.main = "README.rdoc"
   rd.rdoc_files.include("README.rdoc", "lib/**/*.rb")
   rd.rdoc_dir = 'rdoc'
+end
+
+begin
+  require 'code_stats'
+  CodeStats::Tasks.new
+rescue LoadError
 end
