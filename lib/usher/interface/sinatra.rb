@@ -1,8 +1,10 @@
 class Usher
   module Interface
     class Sinatra
+      cattr_reader :router_options
 
-      def initialize
+      def initialize(router_options)
+        @@router_options = router_options
         ::Sinatra.send(:include, Extension)
       end
 
@@ -80,12 +82,14 @@ class Usher
           end
 
           def router
-            @router ||= Usher.new(:request_methods => [:request_method, :host, :port, :scheme],
+            usher_options = { :request_methods => [:request_method, :host, :port, :scheme],
                                   :ignore_trailing_delimiters => true,
                                   :generator => Usher::Util::Generators::URL.new,
                                   :delimiters => ['/', '.', '-'],
                                   :valid_regex => '[0-9A-Za-z\$_\+!\*\',]+',
-                                  :detailed_failure => true)
+                                  :detailed_failure => true }.merge(self.router_options)
+
+            @router ||= Usher.new(usher_options)
             block_given? ? yield(@router) : @router
           end
 
